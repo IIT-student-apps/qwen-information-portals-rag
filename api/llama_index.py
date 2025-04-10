@@ -1,10 +1,10 @@
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.llms.ollama import Ollama
-from chromautils import create_index, load_index  # Импорт новых функций
+from chromautils import create_index, load_index  
 import logging
 import sys
 import os
-# Настройка логирования
+
 logging.basicConfig(
     filename="rag.log",
     level=logging.INFO,
@@ -32,7 +32,6 @@ def main():
     pdf_path = "documents/example.pdf"
     
 
-    # Пробуем загрузить существующий индекс, если его нет — создаём новый
     rag_index = load_index()
     if rag_index is None:
         rag_index = create_index(pdf_path, chunk_size=512, chunk_overlap=50)
