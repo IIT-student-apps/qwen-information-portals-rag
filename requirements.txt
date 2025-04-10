@@ -1,0 +1,6 @@
+llama-index
+chromadb
+os
+llama_index.embeddings.huggingface
+llama_index.vector_stores.chroma
+llama_index.core
