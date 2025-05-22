@@ -17,20 +17,17 @@ def setup_settings():
 
 def process_news_with_llm(query: str, chat_history: list = None) -> str:
     try:
-        news_results = fetch_news_from_db(query, top_k=3)
+        news_results = fetch_news_from_db(query)
         if not news_results:
             logger.warning(f"Новости для запроса '{query}' не найдены")
             return f"Не удалось найти новости по запросу '{query}'. Попробуйте изменить запрос."
-        
         docs = [
             Document(
                 text=news["content"][:1000] + "..." if len(news["content"]) > 1000 else news["content"],
                 metadata={"source_url": news["url"], "title": news["title"]}
             ) for news in news_results
         ]
-        
         index = VectorStoreIndex.from_documents(docs, embed_model=Settings.embed_model)
-        
         memory = ChatMemoryBuffer.from_defaults(token_limit=2000)
         if chat_history:
             formatted_history = [
@@ -39,7 +36,6 @@ def process_news_with_llm(query: str, chat_history: list = None) -> str:
             ]
             memory.set(formatted_history)
             logger.info(f"Установлена история чата: {len(formatted_history)} сообщений")
-        
         chat_engine = index.as_chat_engine(
             chat_mode="context",
             memory=memory,
@@ -47,31 +43,29 @@ def process_news_with_llm(query: str, chat_history: list = None) -> str:
                 "Отвечай на русском. Используй предоставленный контекст и историю чата. "
                 "Указывай источники в формате: [Источник: <URL>]."
             ),
-            similarity_top_k=3,
+            similarity_top_k=2,
             verbose=True
         )
-        
         llm_query = f"На основе предоставленных новостей ответь на вопрос: {query}"
         response = chat_engine.chat(llm_query)
-        
-        # Извлекаем использованные документы из ответа
         used_nodes = response.source_nodes
         used_urls = {node.metadata.get("source_url") for node in used_nodes if node.metadata.get("source_url")}
         logger.debug(f"Использованные источники: {used_urls}")
         
-        # Формируем ответ, избегая дублирования ссылок
-        final_response = response.response
-        if used_urls:
-            # Добавляем только те источники, которые не упомянуты в тексте ответа
-            existing_sources = set()
-            for url in used_urls:
-                if f"[Источник: {url}]" not in final_response:
-                    existing_sources.add(url)
-            if existing_sources:
-                final_response += "\n\n" + "\n".join(f"[Источник: {url}]" for url in existing_sources)
-        
         logger.info("Ответ от LLM успешно получен")
-        return final_response
+
+        used_urls = set()
+        if response.source_nodes:
+            for node in response.source_nodes:
+                source_url = node.metadata.get("source_url")
+                if source_url:  # Добавляем только если URL не пустой
+                    used_urls.add(source_url)
+        logger.info(f"Использованные URL из source_nodes: {used_urls}")
+
+        final_answer = response.response
+
+        logger.info("Ответ от LLM успешно получен")
+        return {"answer": final_answer, "sources": list(used_urls)}
     
     except Exception as e:
         logger.error(f"Ошибка LLM: {str(e)}")

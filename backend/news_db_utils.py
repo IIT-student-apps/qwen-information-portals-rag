@@ -42,6 +42,7 @@ def rebuild_embeddings():
         rows = cursor.fetchall()
         
         for row in rows:
+            print (row['title'])
             id, title, content = row['id'], row['title'], row['content']
             # Комбинируем title и content
             text = f"{title}\n{content or ''}"
@@ -53,30 +54,24 @@ def rebuild_embeddings():
         logger.info(f"Перестроены эмбеддинги для {len(rows)} новостей")
 
 def initialize_faiss_index(force=False):
-    """Инициализирует или перестраивает индекс FAISS."""
     if force:
-        rebuild_embeddings()  # Перестраиваем эмбеддинги с учётом title
-    
+        rebuild_embeddings() 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT id, embedding FROM news WHERE embedding IS NOT NULL ORDER BY id')
         rows = cursor.fetchall()
-        
         if not rows:
             logger.info("Нет данных для создания индекса FAISS")
             return
-        
-        d = 384  # Размерность эмбеддинга
+        d = 384  
         embeddings = []
         ids = []
         for row in rows:
             embedding = pickle.loads(row['embedding'])
             embeddings.append(embedding)
             ids.append(row['id'])
-        
         embeddings = np.array(embeddings, dtype=np.float32)
         embeddings /= np.linalg.norm(embeddings, axis=1, keepdims=True)
-        
         nlist = min(100, len(embeddings))  
         index = faiss.IndexFlatIP(d)  
         if len(embeddings) > 1000:  
@@ -84,16 +79,12 @@ def initialize_faiss_index(force=False):
             index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
             index.train(embeddings)
             index.nprobe = 10
-        
         index.add(embeddings)
-        
         faiss.write_index(index, "faiss_index.bin")
-        
         faiss_to_db = {i: db_id for i, db_id in enumerate(ids)}
         with open("faiss_to_db.json", "w") as f:
             import json
             json.dump(faiss_to_db, f)
-        
         logger.info(f"FAISS индекс создан: {index.ntotal} векторов")
 
 def save_to_database(news_data):
@@ -167,6 +158,7 @@ def save_to_database(news_data):
                                    VALUES (?, ?, ?, ?)''',
                                   (title, content, url, embedding_bytes))
                     inserted_count += cursor.rowcount
+
                     cursor.execute('SELECT id FROM news WHERE url = ?', (url,))
                     news_id = cursor.fetchone()['id']
                     new_ids.append(news_id)
@@ -218,41 +210,47 @@ def update_faiss_index(new_embeddings, new_ids):
     
     logger.info(f"FAISS индекс обновлён: добавлено {len(new_ids)} векторов")
 
-def fetch_news_from_db(query: str, top_k: int = 5):
+def fetch_news_from_db(query: str, top_k: int = 10):
     embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
     query_embedding = np.array(embed_model.get_text_embedding(query), dtype=np.float32)
     query_embedding /= np.linalg.norm(query_embedding)
-    
     index_file = "faiss_index.bin"
     if not os.path.exists(index_file):
         logger.warning("FAISS индекс не найден, создаётся новый")
         initialize_faiss_index()
-    
+
     index = faiss.read_index(index_file)
-    
+
     with open("faiss_to_db.json", "r") as f:
         import json
         faiss_to_db = json.load(f)
         faiss_to_db = {int(k): v for k, v in faiss_to_db.items()}
-    
     distances, faiss_indices = index.search(query_embedding.reshape(1, -1), top_k)
-    
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        db_indices = [faiss_to_db.get(i, -1) for i in faiss_indices[0]]
-        placeholders = ','.join('?' * len(db_indices))
-        cursor.execute(f'SELECT id, title, content, url FROM news WHERE id IN ({placeholders})', db_indices)
+        db_ids_from_faiss = [faiss_to_db.get(i, -1) for i in faiss_indices[0]]
+        valid_db_ids = [idx for idx in db_ids_from_faiss if idx != -1]
+        if not valid_db_ids:
+            logger.warning("Не найдено соответствующих записей в БД для индексов FAISS")
+            return []
+        placeholders = ','.join('?' * len(valid_db_ids))
+        cursor.execute(f'SELECT id, title, content, url FROM news WHERE id IN ({placeholders})', valid_db_ids)
         rows = cursor.fetchall()
-        
+        row_dict = {row['id']: row for row in rows}
         results = []
-        for row, similarity in zip(rows, distances[0]):
-            results.append({
-                "id": row["id"],
-                "title": row["title"],
-                "content": row["content"],
-                "url": row["url"],
-                "similarity": similarity
-            })
-        
+        for i, faiss_idx in enumerate(faiss_indices[0]):
+            db_id = faiss_to_db.get(faiss_idx)
+            if db_id is not None and db_id in row_dict:
+                row = row_dict[db_id]
+                print (row["title"])
+                results.append({
+                    "id": row["id"],
+                    "title": row["title"],
+                    "content": row["content"],
+                    "url": row["url"],
+                    
+                    "similarity": float(distances[0][i])
+                })
+        results.sort(key=lambda x: x['similarity'], reverse=True)
         logger.info(f"Найдено {len(results)} похожих статей для запроса: {query}")
         return results
